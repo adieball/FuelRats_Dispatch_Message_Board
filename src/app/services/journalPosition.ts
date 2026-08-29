@@ -11,8 +11,9 @@
  * machine, which is exactly the account whose position is worth tracking.
  */
 
-const PROXY = () =>
-  localStorage.getItem('fr_deepl_proxy_url') || 'http://localhost:8081';
+import { bridgeProxyUrl } from './bridgeUrls';
+
+const PROXY = () => bridgeProxyUrl();
 
 const KEY_ENABLED = 'ratboard-journal-enabled';
 

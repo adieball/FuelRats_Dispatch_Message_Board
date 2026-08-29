@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { ShipParams } from '../services/spanshService';
+import { randomId } from '../services/randomId';
 
 /**
  * Which build to plot with. Rats commonly fly a shorter-ranged, better-equipped
@@ -79,7 +80,7 @@ export function useRatAccounts() {
   return {
     accounts,
     add:    (cmdr: string, system: string) =>
-      save(prev => [...prev, { id: crypto.randomUUID(), cmdr, system }]),
+      save(prev => [...prev, { id: randomId(), cmdr, system }]),
     // cmdr/system and the ship are edited from different places, so updating one
     // must not clear the other.
     update: (id: string, cmdr: string, system: string) =>
@@ -112,7 +113,7 @@ export function useRatAccounts() {
         const additions = found
           .filter(f => f.cmdr.trim() && !have.has(f.cmdr.trim().toLowerCase()))
           .map(f => ({
-            id: crypto.randomUUID(),
+            id: randomId(),
             cmdr: f.cmdr.trim(),
             system: f.system ?? '',
             positionAt: f.positionAt,

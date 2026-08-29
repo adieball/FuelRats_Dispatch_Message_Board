@@ -12,6 +12,7 @@ import {
   classifyMessageRole,
 } from '../services/colorSettingsService';
 import { openEdsmPopout } from '../services/edsmPopout';
+import { bridgeProxyUrl } from '../services/bridgeUrls';
 import { Button } from '@/app/components/ui/button';
 import { Input } from '@/app/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/app/components/ui/popover';
@@ -175,7 +176,7 @@ export function CaseWindow({
     if (!deeplEnabled) return;
     const apiKey = getDeepLApiKey();
     if (!apiKey) return;
-    const proxyBase = localStorage.getItem('fr_deepl_proxy_url') || 'http://localhost:8081';
+    const proxyBase = bridgeProxyUrl();
     const url = `${proxyBase}/${apiKey.endsWith(':fx') ? 'deepl-proxy' : 'deepl-proxy-pro'}/v2/usage`;
     fetch(url, { headers: { Authorization: `DeepL-Auth-Key ${apiKey}` } })
       .then((r) => r.json())

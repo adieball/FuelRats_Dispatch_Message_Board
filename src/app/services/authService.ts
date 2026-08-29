@@ -1,5 +1,11 @@
+import { isLoopbackHost } from './bridgeUrls';
+import { randomId } from './randomId';
+
 const TOKEN_KEY = 'fr_dispatch_token';
 const OAUTH_STATE_KEY = 'fr_oauth_state';
+
+/** The FuelRats app is registered for this, and only this. */
+const REGISTERED_REDIRECT = 'http://localhost:5173/callback';
 
 
 /**
@@ -43,7 +49,19 @@ let groupsCache: Promise<FuelRatsGroup[]> | null = null;
 
 
 const CLIENT_ID = import.meta.env.VITE_CLIENT_ID as string;
-const REDIRECT_URI = `${window.location.origin}/callback`;
+
+/**
+ * FuelRats will only send the token back to the URI registered on the app,
+ * which is localhost:5173/callback. Using this page's origin when it is a
+ * LAN address is rejected at authorize, so the click appeared to work and
+ * then went nowhere useful. On localhost itself, origin is that URI.
+ */
+function redirectUri(): string {
+  return isLoopbackHost(window.location.hostname)
+    ? `${window.location.origin}/callback`
+    : REGISTERED_REDIRECT;
+}
+
 // users.read.me and groups.read.me are what let /profile return the `groups`
 // relationship, which the Drilled Rat gate reads. A token minted without them
 // still answers /profile -- meta.permissions comes back regardless -- but the
@@ -65,23 +83,50 @@ const REDIRECT_URI = `${window.location.origin}/callback`;
 // and only a genuinely fresh login ever saw the error.
 const SCOPES = 'openid profile rescues.read users.read.me groups.read';
 
+export function isRemoteBoardOrigin(): boolean {
+  return !isLoopbackHost(window.location.hostname);
+}
+
+export function hasOAuthClientId(): boolean {
+  return !!CLIENT_ID;
+}
+
 export const authService = {
   // ── OAuth2 Implicit Grant ────────────────────────────────────────────────
 
-  /** Redirect the browser to the FuelRats login/authorise page. */
-  login(): void {
-    const state = crypto.randomUUID();
+  /**
+   * Build the FuelRats authorize URL and remember the CSRF state.
+   *
+   * Separated from the navigation so a LAN tab can open it in a new window
+   * and still be there to accept a pasted callback URL. FuelRats sends the
+   * token to localhost:5173, which on another machine is that machine, not
+   * this board.
+   */
+  authorizeUrl(): string {
+    if (!CLIENT_ID) {
+      throw new Error(
+        'This build has no FuelRats client id. Add VITE_CLIENT_ID to .env and restart the dev server.',
+      );
+    }
+    const state = randomId();
     sessionStorage.setItem(OAUTH_STATE_KEY, state);
+    // Survives leaving for FuelRats and coming back in another tab to paste.
+    localStorage.setItem(OAUTH_STATE_KEY, state);
 
     const params = new URLSearchParams({
       response_type: 'token',
       client_id: CLIENT_ID,
-      redirect_uri: REDIRECT_URI,
+      redirect_uri: redirectUri(),
       scope: SCOPES,
       state,
     });
 
-    window.location.href = `https://fuelrats.com/authorize?${params}`;
+    return `https://fuelrats.com/authorize?${params}`;
+  },
+
+  /** Redirect this tab to the FuelRats login/authorise page. */
+  login(): void {
+    window.location.href = this.authorizeUrl();
   },
 
   /**
@@ -101,8 +146,10 @@ export const authService = {
     }
 
     const state = params.get('state');
-    const savedState = sessionStorage.getItem(OAUTH_STATE_KEY);
+    const savedState =
+      sessionStorage.getItem(OAUTH_STATE_KEY) || localStorage.getItem(OAUTH_STATE_KEY);
     sessionStorage.removeItem(OAUTH_STATE_KEY);
+    localStorage.removeItem(OAUTH_STATE_KEY);
     if (state !== savedState) {
       throw new Error('OAuth state mismatch — possible CSRF attack');
     }
@@ -117,6 +164,49 @@ export const authService = {
     window.history.replaceState({}, '', window.location.pathname);
 
     return token;
+  },
+
+  /**
+   * Finish sign-in from a pasted FuelRats callback address.
+   *
+   * On another machine, authorize returns to localhost:5173/callback — that
+   * machine's localhost, which is not this board. Safari leaves the token in
+   * the address bar of the failed tab; pasting it here is the rest of the
+   * handshake.
+   */
+  completeFromCallbackInput(raw: string): void {
+    const trimmed = raw.trim();
+    if (!trimmed) throw new Error('Paste the callback address first.');
+    let search = trimmed;
+    try {
+      if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed)) {
+        search = new URL(trimmed).search;
+      } else if (trimmed.includes('?')) {
+        search = trimmed.slice(trimmed.indexOf('?'));
+      } else if (trimmed.includes('access_token=')) {
+        search = trimmed.startsWith('?') ? trimmed : `?${trimmed}`;
+      }
+    } catch {
+      throw new Error('That does not look like a callback address.');
+    }
+    const params = new URLSearchParams(
+      search.startsWith('?') ? search.slice(1) : search,
+    );
+    const error = params.get('error');
+    if (error) {
+      throw new Error(`OAuth error: ${error} — ${params.get('error_description') ?? ''}`);
+    }
+    const state = params.get('state');
+    const savedState =
+      sessionStorage.getItem(OAUTH_STATE_KEY) || localStorage.getItem(OAUTH_STATE_KEY);
+    if (state !== savedState) {
+      throw new Error('OAuth state mismatch — start Sign in again from this page, then paste.');
+    }
+    const token = params.get('access_token');
+    if (!token) throw new Error('No access_token in that address.');
+    sessionStorage.removeItem(OAUTH_STATE_KEY);
+    localStorage.removeItem(OAUTH_STATE_KEY);
+    this.setToken(token);
   },
 
   // ── Token storage (used by both OAuth and manual-token fallback) ─────────

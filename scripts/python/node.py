@@ -10,6 +10,7 @@ import urllib.error
 import webbrowser
 from datetime import datetime, timezone
 import traceback
+import socket
 
 # Suppress spurious "did not receive a valid HTTP request" errors from
 # connections that open the TCP socket but close before completing the
@@ -21,13 +22,24 @@ IRC_PORT = 12346
 PROTOCOL = "fr-dispatch"
 VERSION = "1.0.0"
 
+_cfg_path = None
+
 def load_config():
+    global _cfg_path
     base = os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(__file__))
-    for path in [os.path.join(base, 'bridge-config.json'), os.path.join(base, '..', 'bridge-config.json')]:
+    for path in [
+        os.path.join(base, 'bridge-config.json'),
+        os.path.join(base, '..', 'bridge-config.json'),
+        # Source checkout: node.py lives in scripts/python/, the example
+        # config is at the repo root. Frozen builds never reach this far
+        # unless the two closer files are missing, which is harmless.
+        os.path.join(base, '..', '..', 'bridge-config.json'),
+    ]:
         try:
             with open(os.path.normpath(path)) as f:
                 cfg = json.load(f)
-                print(f"OK Loaded config: {os.path.normpath(path)}")
+                _cfg_path = os.path.normpath(path)
+                print(f"OK Loaded config: {_cfg_path}")
                 return cfg
         except FileNotFoundError:
             continue
@@ -38,6 +50,11 @@ def load_config():
 _cfg       = load_config()
 WS_PORT    = int(_cfg.get('ws_port',    8080))
 PROXY_PORT = int(_cfg.get('proxy_port', 8081))
+# Off until asked. Binding the board, the IRC websocket and the proxy on
+# anything other than loopback lets anyone who can reach this machine send
+# IRC as you, read the journals, and fire the updater. The menu toggle writes
+# this back so it survives a restart.
+_lan_access = bool(_cfg.get('lan_access', False))
 
 # ── DeepL proxy (runs on same port as WebSocket via process_request) ──────────
 
@@ -390,6 +407,101 @@ MIME = {
     '.map':  'application/json',
 }
 
+LOOPBACK = '127.0.0.1'
+ALL_INTERFACES = '0.0.0.0'
+
+
+def bind_host():
+    return ALL_INTERFACES if _lan_access else LOOPBACK
+
+
+def _peer_ip(writer):
+    peer = writer.get_extra_info('peername')
+    if not peer:
+        return ''
+    ip = peer[0]
+    if ip.startswith('::ffff:'):
+        ip = ip[7:]
+    return ip
+
+
+def _is_loopback_ip(ip):
+    return ip in ('127.0.0.1', '::1', '') or ip.startswith('127.')
+
+
+def _lan_addresses():
+    """IPv4 addresses another machine on this network might use to reach us."""
+    found = []
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.connect(('1.1.1.1', 80))
+        ip = probe.getsockname()[0]
+        probe.close()
+        if ip and not ip.startswith('127.'):
+            found.append(ip)
+    except Exception:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith('127.') and ip not in found:
+                found.append(ip)
+    except Exception:
+        pass
+    return found
+
+
+def _lan_payload():
+    urls = []
+    for host in _lan_addresses():
+        urls.append({
+            'host': host,
+            'board': f'http://{host}:{BOARD_PORT}',
+            'ws': f'ws://{host}:{WS_PORT}',
+            'proxy': f'http://{host}:{PROXY_PORT}',
+        })
+    return {
+        'enabled': _lan_access,
+        'bind': bind_host(),
+        'ports': {'board': BOARD_PORT, 'ws': WS_PORT, 'proxy': PROXY_PORT},
+        'urls': urls,
+    }
+
+
+def _save_lan_access():
+    global _cfg_path
+    base = os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(__file__))
+    path = _cfg_path or os.path.join(base, 'bridge-config.json')
+    existing = dict(_cfg)
+    try:
+        if os.path.isfile(path):
+            with open(path, encoding='utf-8') as f:
+                existing = json.load(f)
+    except Exception:
+        pass
+    existing['lan_access'] = _lan_access
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(existing, f, indent=2)
+            f.write('\n')
+        _cfg_path = path
+        print(f"OK Saved lan_access={_lan_access} to {path}")
+    except Exception as e:
+        print(f"WARN could not save lan_access: {e}")
+
+
+def _print_lan_urls():
+    if not _lan_access:
+        print("LAN access: OFF (loopback only)")
+        return
+    print("LAN access: ON  -- AdiIRC/HexChat stay on 127.0.0.1; this process relays")
+    addrs = _lan_addresses()
+    if not addrs:
+        print("  (could not determine a LAN address)")
+        return
+    for a in addrs:
+        print(f"  Board: http://{a}:{BOARD_PORT}")
+
 
 def _board_root():
     """
@@ -476,7 +588,13 @@ def _run_updater():
 
 
 async def handle_board_http(reader, writer):
-    """Static file server for the board. Loopback only, GET and HEAD only."""
+    """Static file server for the board. GET and HEAD only.
+
+    Bound to loopback unless LAN access is on. The realpath check below is
+    what stops "/../../.." reading outside dist/ -- a request line is entirely
+    attacker-controlled, and that matters more once this is reachable from
+    the rest of the network.
+    """
     try:
         data = b''
         while b'\r\n\r\n' not in data:
@@ -532,6 +650,8 @@ async def handle_board_http(reader, writer):
             pass
 
 async def handle_deepl_http(reader, writer):
+    global _lan_access
+    rebind = False
     try:
         data = b''
         while b'\r\n\r\n' not in data:
@@ -567,6 +687,39 @@ async def handle_deepl_http(reader, writer):
 
         if path.startswith('/update') and method == 'POST':
             status, content_type, resp_body = _run_updater()
+        elif path.split('?', 1)[0].rstrip('/') == '/lan':
+            # Toggle lives here because the UI already talks to this port,
+            # and changing the bind has to happen in this process -- a
+            # localStorage flag in the browser cannot open a socket.
+            if method == 'POST':
+                if not _is_loopback_ip(_peer_ip(writer)):
+                    status, content_type, resp_body = (
+                        403, 'application/json',
+                        json.dumps({
+                            'error': 'LAN access can only be changed from the machine running the board',
+                        }).encode(),
+                    )
+                else:
+                    try:
+                        parsed = json.loads(body.decode() or '{}')
+                        wanted = bool(parsed['enabled']) if 'enabled' in parsed else _lan_access
+                    except Exception:
+                        wanted = _lan_access
+                    if wanted != _lan_access:
+                        _lan_access = wanted
+                        _save_lan_access()
+                        rebind = True
+                    status, content_type, resp_body = (
+                        200, 'application/json', json.dumps(_lan_payload()).encode(),
+                    )
+            elif method == 'GET':
+                status, content_type, resp_body = (
+                    200, 'application/json', json.dumps(_lan_payload()).encode(),
+                )
+            else:
+                writer.write(b'HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n')
+                await writer.drain()
+                return
         elif path.startswith('/journal/commanders'):
             payload = json.dumps(_journal_commanders()).encode()
             status, content_type, resp_body = 200, 'application/json', payload
@@ -595,6 +748,11 @@ async def handle_deepl_http(reader, writer):
         ).encode() + resp_body
         writer.write(response)
         await writer.drain()
+        if rebind:
+            # After the response: this handler is running on the proxy
+            # server we are about to close. The lock in _rebind_listeners
+            # serialises overlapping toggles.
+            asyncio.create_task(_rebind_listeners())
     except Exception as e:
         print(f"[Proxy] HTTP error: {e}")
     finally:
@@ -845,7 +1003,78 @@ def parse_irc_message(line):
         print(f"WARN Error parsing IRC message '{line}': {e}")
         return None
 
+# Servers we may close and reopen when LAN access is toggled. AdiIRC/HexChat
+# are not in this list: they stay on 127.0.0.1:12346, and handle_client still
+# connects there. A remote browser talks to us; we talk to the IRC client.
+_servers = {'proxy': None, 'board': None, 'ws': None}
+_serve_board = False
+_rebind_lock = None
+
+
+async def _close_server(server):
+    if server is None:
+        return
+    server.close()
+    await server.wait_closed()
+
+
+async def _start_listeners(*, open_browser=False):
+    host = bind_host()
+    _servers['proxy'] = await asyncio.start_server(
+        handle_deepl_http, host, PROXY_PORT, reuse_address=True,
+    )
+    print(f"OK DeepL proxy listening on {host}:{PROXY_PORT}")
+
+    _servers['board'] = None
+    if _serve_board and os.path.isdir(_board_root()):
+        _servers['board'] = await asyncio.start_server(
+            handle_board_http, host, BOARD_PORT, reuse_address=True,
+        )
+        print(f"OK Board listening on http://localhost:{BOARD_PORT}")
+        if open_browser and '--no-browser' not in sys.argv:
+            try:
+                webbrowser.open(f'http://localhost:{BOARD_PORT}')
+            except Exception:
+                pass
+    elif _serve_board:
+        print("-- No dist/ in this build; serve the board yourself")
+
+    _servers['ws'] = await websockets.serve(
+        handle_client,
+        host,
+        WS_PORT,
+        ping_interval=20,
+        ping_timeout=10,
+        reuse_address=True,
+    )
+    print(f"OK WebSocket bridge listening on {host}:{WS_PORT}")
+    _print_lan_urls()
+
+
+async def _stop_listeners():
+    await _close_server(_servers.get('ws'))
+    await _close_server(_servers.get('proxy'))
+    await _close_server(_servers.get('board'))
+    _servers['ws'] = _servers['proxy'] = _servers['board'] = None
+
+
+async def _rebind_listeners():
+    try:
+        async with _rebind_lock:
+            print(f"-- Rebinding listeners to {bind_host()}")
+            await _stop_listeners()
+            # Windows holds a closed port briefly; without this the next bind
+            # can raise WSAEADDRINUSE even with reuse_address.
+            await asyncio.sleep(0.2)
+            await _start_listeners(open_browser=False)
+            print("Waiting for dispatch board connection...")
+    except Exception as e:
+        print(f"ERR Rebind failed: {e}")
+        traceback.print_exc()
+
+
 async def main():
+    global _rebind_lock, _serve_board
     print("=" * 60)
     print("FuelRats IRC WebSocket Bridge")
     print("=" * 60)
@@ -858,44 +1087,21 @@ async def main():
     print()
     print("=" * 60)
 
+    _rebind_lock = asyncio.Lock()
+    # A source checkout is a development machine, where `npm run dev` owns
+    # port 5173. Serving dist/ here as well would have `npm run bridge`
+    # fight the dev server for it, and a stale dist/ from an earlier build
+    # is not what anyone editing the board wants to see anyway. The old
+    # workflow keeps working exactly as it did.
+    _serve_board = getattr(sys, 'frozen', False) or '--serve' in sys.argv
+    if not _serve_board:
+        print("-- Source checkout: use npm run dev, or --serve to serve dist/")
+
     try:
-        proxy_server = await asyncio.start_server(handle_deepl_http, '127.0.0.1', PROXY_PORT)
-        print(f"OK DeepL proxy listening on port {PROXY_PORT}")
-
-        # The board, but only from the packaged build -- or on request.
-        #
-        # A source checkout is a development machine, where `npm run dev` owns
-        # port 5173. Serving dist/ here as well would have `npm run bridge`
-        # fight the dev server for it, and a stale dist/ from an earlier build
-        # is not what anyone editing the board wants to see anyway. The old
-        # workflow keeps working exactly as it did.
-        serve_board = getattr(sys, 'frozen', False) or '--serve' in sys.argv
-        board_server = None
-        if serve_board and os.path.isdir(_board_root()):
-            board_server = await asyncio.start_server(handle_board_http, '127.0.0.1', BOARD_PORT)
-            print(f"OK Board listening on http://localhost:{BOARD_PORT}")
-            if '--no-browser' not in sys.argv:
-                try:
-                    webbrowser.open(f'http://localhost:{BOARD_PORT}')
-                except Exception:
-                    pass
-        elif serve_board:
-            print("-- No dist/ in this build; serve the board yourself")
-        else:
-            print("-- Source checkout: use npm run dev, or --serve to serve dist/")
-
-        async with websockets.serve(
-            handle_client,
-            "127.0.0.1",
-            WS_PORT,
-            ping_interval=20,
-            ping_timeout=10,
-        ):
-            print(f"OK WebSocket bridge listening on port {WS_PORT}")
-            print("Waiting for dispatch board connection...")
-            print()
-            async with proxy_server:
-                await asyncio.Future()
+        await _start_listeners(open_browser=True)
+        print("Waiting for dispatch board connection...")
+        print()
+        await asyncio.Future()
     except OSError as e:
         if "address already in use" in str(e).lower():
             print(f"INFO Bridge already running on port {WS_PORT}, exiting.")

@@ -1,3 +1,5 @@
+import { langblyProxyUrl } from './bridgeUrls';
+
 const LANGBLY_KEY_STORAGE = 'fr_langbly_api_key';
 
 export function getLangblyApiKey(): string {
@@ -28,7 +30,7 @@ export async function langblyTranslate(text: string, targetLang = 'en'): Promise
   const apiKey = getLangblyApiKey();
   if (!apiKey) return null;
 
-  const proxyBase = localStorage.getItem('fr_langbly_proxy_url') || 'http://localhost:8081';
+  const proxyBase = langblyProxyUrl();
 
   try {
     const res = await fetch(`${proxyBase}/langbly-proxy/language/translate/v2`, {

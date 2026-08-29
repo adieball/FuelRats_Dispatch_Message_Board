@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { getDeepLApiKey, setDeepLApiKey } from '../services/translationService';
+import { bridgeProxyUrl } from '../services/bridgeUrls';
 import { Button } from '@/app/components/ui/button';
 import { Input } from '@/app/components/ui/input';
 
@@ -34,7 +35,7 @@ export function DeepLTestPage({ onBack }: { onBack: () => void }) {
   const [usageResult, setUsageResult] = useState<{ count: number; limit: number } | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
 
-  const proxyBase = localStorage.getItem('fr_deepl_proxy_url') || 'http://localhost:8081';
+  const proxyBase = bridgeProxyUrl();
   const isFree = apiKey.endsWith(':fx');
   const baseUrl = isFree ? `${proxyBase}/deepl-proxy` : `${proxyBase}/deepl-proxy-pro`;
   const tier = apiKey ? (isFree ? 'Free tier' : 'Pro tier') : 'No key saved';

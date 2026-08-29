@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { getLangblyApiKey, setLangblyApiKey } from '../services/langblyService';
+import { langblyProxyUrl } from '../services/bridgeUrls';
 import { Button } from '@/app/components/ui/button';
 import { Input } from '@/app/components/ui/input';
 
@@ -52,7 +53,7 @@ export function LangblyTestPage({ onBack }: { onBack: () => void }) {
 
   const effectiveLang = targetLang === '__custom__' ? customCode.trim() : targetLang;
 
-  const proxyBase = localStorage.getItem('fr_langbly_proxy_url') || 'http://localhost:8081';
+  const proxyBase = langblyProxyUrl();
   const translateEndpoint = `${proxyBase}/langbly-proxy/language/translate/v2`;
 
   const saveKey = () => {

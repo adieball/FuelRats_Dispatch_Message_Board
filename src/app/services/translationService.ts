@@ -1,3 +1,5 @@
+import { bridgeProxyUrl } from './bridgeUrls';
+
 const DEEPL_KEY_STORAGE = 'fr_deepl_api_key';
 
 export function getDeepLApiKey(): string {
@@ -28,7 +30,7 @@ export async function translateText(text: string, targetLang = 'EN'): Promise<st
   if (!apiKey) return null;
 
   // Route through the local bridge proxy to avoid CORS — port is user-configurable
-  const proxyBase = localStorage.getItem('fr_deepl_proxy_url') || 'http://localhost:8081';
+  const proxyBase = bridgeProxyUrl();
   const isFree = apiKey.endsWith(':fx');
   const baseUrl = isFree ? `${proxyBase}/deepl-proxy` : `${proxyBase}/deepl-proxy-pro`;
 

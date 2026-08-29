@@ -1,9 +1,12 @@
 import { useState, useEffect } from 'react';
 import { IRCConnectionStatus } from '../services/ircWebSocket';
+import {
+  IRC_URL_KEY, PROXY_URL_KEY,
+  bridgeProxyUrl, bridgeWsUrl, defaultProxyUrl, defaultWsUrl,
+} from '../services/bridgeUrls';
 
-const IRC_URL_KEY = 'fr_irc_ws_url';
-export const PROXY_URL_KEY = 'fr_deepl_proxy_url';
-export const DEFAULT_PROXY_URL = 'http://localhost:8081';
+export { PROXY_URL_KEY };
+export const DEFAULT_PROXY_URL = defaultProxyUrl();
 
 interface IRCConnectionPanelProps {
   status: IRCConnectionStatus;
@@ -26,8 +29,8 @@ export function IRCConnectionPanel({
   forceExpanded = false,
   embedded = false,
 }: IRCConnectionPanelProps) {
-  const [wsUrl, setWsUrl] = useState(() => localStorage.getItem(IRC_URL_KEY) || 'ws://localhost:8080');
-  const [proxyUrl, setProxyUrl] = useState(() => localStorage.getItem(PROXY_URL_KEY) || DEFAULT_PROXY_URL);
+  const [wsUrl, setWsUrl] = useState(() => bridgeWsUrl());
+  const [proxyUrl, setProxyUrl] = useState(() => bridgeProxyUrl());
   const [isExpanded, setIsExpanded] = useState(false);
   const [launchHint, setLaunchHint] = useState(false);
   const [autoLaunch, setAutoLaunch] = useState(() => localStorage.getItem('fr_auto_launch') === 'true');
@@ -107,7 +110,7 @@ export function IRCConnectionPanel({
           value={wsUrl}
           onChange={(e) => setWsUrl(e.target.value)}
           disabled={status === 'connected' || status === 'connecting'}
-          placeholder="ws://localhost:8080"
+          placeholder={defaultWsUrl()}
           className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1 text-sm text-white placeholder-slate-500 disabled:opacity-50"
         />
       </div>
@@ -118,7 +121,7 @@ export function IRCConnectionPanel({
           value={proxyUrl}
           onChange={(e) => setProxyUrl(e.target.value)}
           onBlur={() => { if (proxyUrl.trim()) localStorage.setItem(PROXY_URL_KEY, proxyUrl.trim()); }}
-          placeholder="http://localhost:8081"
+          placeholder={defaultProxyUrl()}
           className="w-full bg-slate-900 border border-slate-600 rounded px-2 py-1 text-sm text-white placeholder-slate-500"
         />
       </div>

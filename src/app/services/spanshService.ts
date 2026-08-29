@@ -1,4 +1,5 @@
 import { FSD_STATS, GUARDIAN_BOOSTER_LY } from './fsdData';
+import { bridgeProxyUrl } from './bridgeUrls';
 
 /**
  * Jump estimates via Spansh's galaxy plotter.
@@ -14,8 +15,7 @@ import { FSD_STATS, GUARDIAN_BOOSTER_LY } from './fsdData';
  * case x account pair.
  */
 
-const PROXY = () =>
-  localStorage.getItem('fr_deepl_proxy_url') || 'http://localhost:8081';
+const PROXY = () => bridgeProxyUrl();
 
 /** Above this, neutron supercharging is assumed; below it, plain jumps. */
 export const NEUTRON_THRESHOLD_LY = 1000;

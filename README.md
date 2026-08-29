@@ -157,9 +157,33 @@ Click **Login** and you'll be redirected to [fuelrats.com](https://fuelrats.com)
 - Nick change detection and deduplication
 - AdiIRC and HexChat script support (see `scripts/IRC/`)
 - Optional `fr-dispatch://` protocol handler for one-click bridge launch
+- Optional LAN bind so another machine on the same network can open the board
+  (Menu → Allow LAN access; the IRC client stays on this PC)
 
 ---
 
 ## Changelog
 
 Release history lives in [CHANGELOG.md](CHANGELOG.md).
+
+### LAN access
+
+Off by default. **Menu → Allow LAN access** rebinds the board, the IRC
+WebSocket and the proxy onto all interfaces so another machine on the same
+network can open the page.
+
+AdiIRC and HexChat are unchanged: they still listen on this computer
+(`127.0.0.1:12346`). FRBoard.exe is the relay — a browser on the other
+machine talks to it, and it talks to the IRC client here. You do not need to
+install anything on the other machine, and you should not move the IRC client
+there.
+
+The menu shows an address like `http://192.168.x.x:5173` once it is on. Windows
+Firewall may prompt, or silently block ports `5173`, `8080` and `8081`.
+
+FuelRats sign-in is registered for `http://localhost:5173/callback`. A
+browser on another machine is sent there after authorising — that machine's
+localhost, not this board. Copy the address from the failed tab (the token is
+still in it) and paste it on the login page. Safari used to swallow the Sign
+in click entirely: `crypto.randomUUID()` is not allowed on `http://` LAN
+addresses.

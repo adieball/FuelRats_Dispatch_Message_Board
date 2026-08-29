@@ -15,6 +15,8 @@ import { fuelRatsApi, apiDebug } from '../services/fuelRatsApi';
 import { ircWebSocket, IRCMessage, IRCConnectionStatus } from '../services/ircWebSocket';
 import { IRCConnectionPanel } from './IRCConnectionPanel';
 import { openEdsmPopout } from '../services/edsmPopout';
+import { bridgeWsUrl } from '../services/bridgeUrls';
+import { fetchLanStatus, setLanAccess, type LanAccessStatus } from '../services/lanAccessService';
 import { findLatestGrabDuration, parseManualInput } from '../services/codeRedTimerService';
 import { readRatMessage } from '../services/ratMessageService';
 import fuelRatsLogo from './image/TransparentBackgroundRatto.png';
@@ -522,6 +524,92 @@ function AlertSettingsMenu({
   );
 }
 
+/**
+ * Opt-in bind of the board, WebSocket and proxy onto the LAN.
+ *
+ * Off until asked: those sockets used to be localhost-only so that anyone on
+ * the same network could not send IRC as you, read your journals, or fire the
+ * updater. Turning this on rebinds them to 0.0.0.0. AdiIRC and HexChat stay
+ * on 127.0.0.1 -- this process is the relay, so a browser on another machine
+ * talks to us and we talk to the IRC client on this one.
+ *
+ * Hidden when the bridge is not reachable, rather than showing a broken
+ * toggle: there is nothing to rebind if FRBoard.exe is not running.
+ */
+function LanAccessMenu() {
+  const [status, setStatus] = React.useState<LanAccessStatus | null>(null);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [copied, setCopied] = React.useState(false);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    fetchLanStatus()
+      .then((s) => { if (!cancelled) setStatus(s); })
+      .catch(() => { if (!cancelled) setStatus(null); });
+    return () => { cancelled = true; };
+  }, []);
+
+  if (!status) return null;
+
+  const onToggle = async (on: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      setStatus(await setLanAccess(on));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not change LAN access');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const url = status.urls[0]?.board;
+  const copyUrl = () => {
+    if (!url) return;
+    void navigator.clipboard.writeText(url).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    });
+  };
+
+  return (
+    <>
+      <div className="my-1 border-t border-slate-700/60" />
+      <div className="px-3 pt-1.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+        Network
+      </div>
+      <AlertToggle
+        label="Allow LAN access"
+        checked={status.enabled}
+        onChange={on => { if (!busy) void onToggle(on); }}
+        hint={busy ? '…' : undefined}
+      />
+      {status.enabled && url && (
+        <button
+          type="button"
+          onClick={copyUrl}
+          title="Copy address"
+          className="block w-full text-left px-3 pb-1 text-[10px] text-slate-500 leading-snug max-w-56 hover:text-slate-300"
+        >
+          Open on another machine:{' '}
+          <span className="text-slate-400 select-text">{url}</span>
+          {copied ? ' — copied' : ''}
+        </button>
+      )}
+      {status.enabled && (
+        <p className="px-3 pb-1 text-[10px] text-slate-600 leading-snug max-w-56">
+          IRC stays on this PC. Windows Firewall may ask, or block ports{' '}
+          {status.ports.board}/{status.ports.ws}/{status.ports.proxy}.
+        </p>
+      )}
+      {error && (
+        <p className="px-3 pb-1 text-[10px] text-red-400 leading-snug max-w-56">{error}</p>
+      )}
+    </>
+  );
+}
+
 function HeaderMenu({
   view,
   onSetView,
@@ -582,6 +670,7 @@ function HeaderMenu({
           </button>
           <div className="my-1 border-t border-slate-700/60" />
           <AlertSettingsMenu settings={alertSettings} onChange={onAlertSettingsChange} />
+          <LanAccessMenu />
           <div className="my-1 border-t border-slate-700/60" />
           <button
             onClick={() => { window.location.hash = '#search'; setOpen(false); }}
@@ -1087,9 +1176,10 @@ export function DispatchBoard({ onLogout }: { onLogout?: () => void }) {
       }
     };
 
-    // Auto-connect using the saved URL (defaults to ws://localhost:8080)
-    const savedUrl = localStorage.getItem('fr_irc_ws_url') || 'ws://localhost:8080';
-    ircWebSocket.connect(savedUrl);
+    // Auto-connect using the saved URL, falling back to this page's host so a
+    // tab opened from another machine reaches the process serving it rather
+    // than its own localhost.
+    ircWebSocket.connect(bridgeWsUrl());
 
     return () => {
       ircWebSocket.disconnect();

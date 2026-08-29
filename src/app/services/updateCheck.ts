@@ -11,6 +11,8 @@
  * a month.
  */
 
+import { bridgeProxyUrl } from './bridgeUrls';
+
 // Whichever repository this build was made from -- see scripts/repo.mjs. Not
 // hard-coded, because this project is a fork: a build made from some other
 // checkout must check that checkout's releases, or it would offer to replace
@@ -49,7 +51,7 @@ const CACHE_KEY = 'fr_update_check';
 
 /** Where the bridge listens. Same default the rest of the board uses. */
 function bridgeBase(): string {
-  return localStorage.getItem('fr_deepl_proxy_url') || 'http://localhost:8081';
+  return bridgeProxyUrl();
 }
 
 export interface UpdateInfo {
