@@ -409,6 +409,12 @@ MIME = {
 
 LOOPBACK = '127.0.0.1'
 ALL_INTERFACES = '0.0.0.0'
+# Actual bind after the last successful listen. Once we have opened
+# 0.0.0.0 we keep it for the life of the process: going back to loopback
+# means closing the WebSocket, and that used to hang forever (see
+# handle_client) which left IRC dead until a restart. Turning LAN off
+# then only refuses non-local peers.
+_bound_host = None
 
 
 def bind_host():
@@ -417,12 +423,20 @@ def bind_host():
 
 def _peer_ip(writer):
     peer = writer.get_extra_info('peername')
-    if not peer:
+    return _addr_ip(peer)
+
+
+def _addr_ip(addr):
+    if not addr:
         return ''
-    ip = peer[0]
+    ip = addr[0]
     if ip.startswith('::ffff:'):
         ip = ip[7:]
     return ip
+
+
+def _ws_peer_ip(websocket):
+    return _addr_ip(getattr(websocket, 'remote_address', None))
 
 
 def _is_loopback_ip(ip):
@@ -462,7 +476,8 @@ def _lan_payload():
         })
     return {
         'enabled': _lan_access,
-        'bind': bind_host(),
+        'bind': _bound_host or bind_host(),
+        'rebound': False,
         'ports': {'board': BOARD_PORT, 'ws': WS_PORT, 'proxy': PROXY_PORT},
         'urls': urls,
     }
@@ -609,6 +624,11 @@ async def handle_board_http(reader, writer):
             return
         method, path = parts[0], parts[1]
 
+        if not _lan_access and not _is_loopback_ip(_peer_ip(writer)):
+            writer.write(b'HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n')
+            await writer.drain()
+            return
+
         if method not in ('GET', 'HEAD'):
             writer.write(b'HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n')
             await writer.drain()
@@ -652,6 +672,7 @@ async def handle_board_http(reader, writer):
 async def handle_deepl_http(reader, writer):
     global _lan_access
     rebind = False
+    drop_remote = False
     try:
         data = b''
         while b'\r\n\r\n' not in data:
@@ -671,6 +692,11 @@ async def handle_deepl_http(reader, writer):
             if ':' in line:
                 k, _, v = line.partition(':')
                 headers[k.strip().lower()] = v.strip()
+
+        if not _lan_access and not _is_loopback_ip(_peer_ip(writer)):
+            writer.write(b'HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n')
+            await writer.drain()
+            return
 
         if method == 'OPTIONS':
             writer.write(f'HTTP/1.1 204 No Content\r\n{CORS}Content-Length: 0\r\n\r\n'.encode())
@@ -708,9 +734,17 @@ async def handle_deepl_http(reader, writer):
                     if wanted != _lan_access:
                         _lan_access = wanted
                         _save_lan_access()
-                        rebind = True
+                        # Opening 0.0.0.0 is the only bind change that is
+                        # required. Closing it again hung wait_closed (the IRC
+                        # pump kept the handler alive) and IRC never came back.
+                        # Off then just refuses non-local peers.
+                        if wanted and _bound_host != ALL_INTERFACES:
+                            rebind = True
+                        elif not wanted:
+                            drop_remote = True
+                    payload = json.dumps({**_lan_payload(), 'rebound': rebind}).encode()
                     status, content_type, resp_body = (
-                        200, 'application/json', json.dumps(_lan_payload()).encode(),
+                        200, 'application/json', payload,
                     )
             elif method == 'GET':
                 status, content_type, resp_body = (
@@ -749,10 +783,11 @@ async def handle_deepl_http(reader, writer):
         writer.write(response)
         await writer.drain()
         if rebind:
-            # After the response: this handler is running on the proxy
-            # server we are about to close. The lock in _rebind_listeners
-            # serialises overlapping toggles.
-            asyncio.create_task(_rebind_listeners())
+            # After the response, and not from this handler: wait_closed on
+            # the proxy waits for us, so awaiting the rebind here deadlocks.
+            asyncio.create_task(_deferred_rebind())
+        if drop_remote:
+            asyncio.create_task(_drop_remote_clients())
     except Exception as e:
         print(f"[Proxy] HTTP error: {e}")
     finally:
@@ -835,6 +870,11 @@ elif arg == "--unregister":
 connected_clients = set()
 
 async def handle_client(websocket):
+    if not _lan_access and not _is_loopback_ip(_ws_peer_ip(websocket)):
+        print(f"-- Refused non-local WebSocket from {_ws_peer_ip(websocket)}")
+        await websocket.close(1008, 'LAN access is off')
+        return
+
     connected_clients.add(websocket)
     client_addr = websocket.remote_address if hasattr(websocket, 'remote_address') else 'unknown'
     print(f"OK Dispatch board connected from {client_addr}")
@@ -941,7 +981,20 @@ async def handle_client(websocket):
                 print(f"ERR Error reading from IRC: {e}")
                 traceback.print_exc()
 
-        await asyncio.gather(ws_to_irc(), irc_to_ws())
+        # Stop when either side ends. gather() waited for both, and irc_to_ws
+        # blocks on AdiIRC until a line arrives -- so a closed browser (or a
+        # LAN rebind closing every socket) left this handler alive, and
+        # server.wait_closed hung forever. IRC then stayed down until restart.
+        ws_task = asyncio.create_task(ws_to_irc())
+        irc_task = asyncio.create_task(irc_to_ws())
+        _done, pending = await asyncio.wait(
+            {ws_task, irc_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     except websockets.exceptions.ConnectionClosedError as e:
         print(f"WebSocket connection closed: {e}")
@@ -1019,6 +1072,7 @@ async def _close_server(server):
 
 
 async def _start_listeners(*, open_browser=False):
+    global _bound_host
     host = bind_host()
     _servers['proxy'] = await asyncio.start_server(
         handle_deepl_http, host, PROXY_PORT, reuse_address=True,
@@ -1048,6 +1102,7 @@ async def _start_listeners(*, open_browser=False):
         reuse_address=True,
     )
     print(f"OK WebSocket bridge listening on {host}:{WS_PORT}")
+    _bound_host = host
     _print_lan_urls()
 
 
@@ -1058,16 +1113,39 @@ async def _stop_listeners():
     _servers['ws'] = _servers['proxy'] = _servers['board'] = None
 
 
+async def _deferred_rebind():
+    # Let the POST handler finish so wait_closed is not waiting on us.
+    await asyncio.sleep(0.05)
+    await _rebind_listeners()
+
+
+async def _drop_remote_clients():
+    print("-- LAN access off; dropping non-local WebSocket clients")
+    for ws in list(connected_clients):
+        if not _is_loopback_ip(_ws_peer_ip(ws)):
+            try:
+                await ws.close(1008, 'LAN access is off')
+            except Exception:
+                pass
+
+
 async def _rebind_listeners():
     try:
         async with _rebind_lock:
             print(f"-- Rebinding listeners to {bind_host()}")
             await _stop_listeners()
-            # Windows holds a closed port briefly; without this the next bind
-            # can raise WSAEADDRINUSE even with reuse_address.
-            await asyncio.sleep(0.2)
-            await _start_listeners(open_browser=False)
-            print("Waiting for dispatch board connection...")
+            last = None
+            for wait in (0.3, 0.6, 1.0, 2.0):
+                await asyncio.sleep(wait)
+                try:
+                    await _start_listeners(open_browser=False)
+                    print("Waiting for dispatch board connection...")
+                    return
+                except OSError as e:
+                    last = e
+                    print(f"WARN bind {bind_host()} failed ({e}), retrying")
+            print(f"ERR Rebind failed: {last}")
+            traceback.print_exc()
     except Exception as e:
         print(f"ERR Rebind failed: {e}")
         traceback.print_exc()

@@ -10,6 +10,7 @@ export interface LanAccessUrl {
 export interface LanAccessStatus {
   enabled: boolean;
   bind: string;
+  rebound?: boolean;
   ports: { board: number; ws: number; proxy: number };
   urls: LanAccessUrl[];
 }

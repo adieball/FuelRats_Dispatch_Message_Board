@@ -556,7 +556,15 @@ function LanAccessMenu() {
     setBusy(true);
     setError(null);
     try {
-      setStatus(await setLanAccess(on));
+      const next = await setLanAccess(on);
+      setStatus(next);
+      if (next.rebound) {
+        // The POST returns before the listener is back. Wait, then open a
+        // fresh socket with a full retry budget -- the drop from rebind
+        // otherwise burns the existing reconnect attempts and stays red.
+        await new Promise((r) => window.setTimeout(r, 800));
+        ircWebSocket.reconnect(bridgeWsUrl());
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not change LAN access');
     } finally {

@@ -88,6 +88,32 @@ export class IRCWebSocketService {
   }
 
   /**
+   * Drop any current socket and connect again, resetting the retry budget.
+   *
+   * Used after a LAN rebind, which closes the listener the existing
+   * connection was using. disconnect() also prevents auto-reconnect, so a
+   * follow-up connect() would have no retries left if the first attempt
+   * landed while the port was still down.
+   */
+  reconnect(url: string): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.reconnectAttempts = 0;
+    const old = this.ws;
+    this.ws = null;
+    if (old) {
+      old.onclose = null;
+      old.onerror = null;
+      old.onmessage = null;
+      old.onopen = null;
+      try { old.close(); } catch { /* already closed */ }
+    }
+    this.connect(url);
+  }
+
+  /**
    * Send a message to IRC via WebSocket
    */
   sendMessage(target: string, message: string): void {
